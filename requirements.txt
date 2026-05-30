@@ -1,0 +1,17 @@
+# Core RAG / LangChain
+langchain
+langchain-community
+langchain-huggingface
+langchain-chroma
+langchain-google-genai
+
+# Vector store + embeddings
+chromadb
+sentence-transformers
+
+# PDF extraction
+pymupdf
+pdfplumber
+
+# Config
+python-dotenv
