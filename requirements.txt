@@ -12,6 +12,7 @@ sentence-transformers
 # PDF extraction
 pymupdf
 pdfplumber
+easyocr
 
 # Config
 python-dotenv
