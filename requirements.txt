@@ -4,6 +4,8 @@ langchain-community
 langchain-huggingface
 langchain-chroma
 langchain-google-genai
+langchain-groq
+youtube-transcript-api
 
 # Vector store + embeddings
 chromadb
