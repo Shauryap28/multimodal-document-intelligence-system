@@ -1,8 +1,7 @@
 # Multimodal Document Intelligence System
 
 A RAG system for chatting with documents across multiple types — text PDFs,
-scanned pages, invoices and forms, image-based content. Built as a portfolio
-project for placements (ML / SDE roles).
+scanned pages, invoices and forms, image-based content. 
 
 > **Status:** Phases 1 and 2 complete — text PDFs (with table extraction),
 > scanned PDFs (via EasyOCR), persistent vector store, LCEL chain, manual
