@@ -24,15 +24,17 @@ DISTANCE_METRIC = "cosine"   # matches the normalized BGE embeddings
 
 # --- Retrieval ---
 TOP_K = 4
-
-# MMR (Maximal Marginal Relevance) retrieval params.
-MMR_FETCH_K = 20      # candidates fetched before diversification
-MMR_LAMBDA = 0.5      # 1.0 = pure relevance, 0.0 = pure diversity
+MMR_FETCH_K = 20
+MMR_LAMBDA = 0.5
 
 # --- Generation ---
-MAX_OUTPUT_TOKENS = 512   # cap output during testing
+# Per-query answers stay short to save free-tier tokens.
+MAX_OUTPUT_TOKENS = 512
+# Image descriptions are a ONE-TIME ingestion cost and should be complete,
+# so they get a much larger budget than per-query answers.
+VISION_MAX_OUTPUT_TOKENS = 2048
 
-# --- OCR (scanned PDFs, Phase 2) ---
+# --- OCR (scanned PDFs / image-text, Phase 2) ---
 OCR_LANGUAGES = ["en"]
 OCR_DPI = 200
 OCR_MIN_CONFIDENCE = 0.3

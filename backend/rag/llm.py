@@ -6,11 +6,14 @@ Picks the right provider for each task:
                 text RAG chain across Phases 1, 2, and YouTube.
 
     "vision" -> Gemini 2.5 Flash. Multimodal. Used in Phase 3 for invoices,
-                forms, embedded images, and complex/handwritten scans.
+                forms, images, and complex/handwritten scans.
 
 The rest of the codebase calls get_llm(task) and does not import providers
-directly. Switching providers later (e.g. swapping Groq -> Ollama for a
-fully offline stack) is a one-file change here.
+directly. Switching providers later is a one-file change here.
+
+Note: text and vision use SEPARATE output-token budgets. Per-query answers
+(text) stay short; image descriptions (vision) are a one-time ingestion cost
+and get a larger budget so they can be complete.
 """
 from langchain_groq import ChatGroq
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -43,7 +46,7 @@ def get_llm(task: str = "text"):
         return ChatGoogleGenerativeAI(
             model=settings.GEMINI_VISION_MODEL,
             temperature=0,
-            max_output_tokens=settings.MAX_OUTPUT_TOKENS,
+            max_output_tokens=settings.VISION_MAX_OUTPUT_TOKENS,
         )
 
     raise ValueError(f"Unknown LLM task: {task!r}. Use 'text' or 'vision'.")
