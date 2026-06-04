@@ -1,86 +1,79 @@
 # Multimodal Document Intelligence System
 
-A RAG system for chatting with documents across multiple types and sources —
-text PDFs, scanned pages, YouTube videos, and (in coming phases) invoices,
-forms, and image-based content. 
+A RAG system for chatting with documents across many types and sources - text
+PDFs, scanned pages, standalone images (typed or visual), invoices/forms, and
+YouTube videos. Built as a portfolio project for placements (ML / SDE roles).
 
-> **Status:** Phase 2.5 complete — text PDFs (with tables), scanned PDFs
-> (EasyOCR), YouTube transcripts, persistent vector store, LCEL chain, MMR
-> retrieval, multi-provider LLM (Groq + Gemini), manual doc-type router,
-> Streamlit chat UI. See [Roadmap](#roadmap) for upcoming phases.
+> **Status:** Phase 3 complete. Six ingestion pipelines, two LLM providers
+> (Groq for text, Gemini for vision), structured and unstructured extraction,
+> a manual doc-type router, and a Streamlit chat UI. See [Roadmap](#roadmap).
 
-For deep design rationale on every tool and parameter, see [`DESIGN.md`](DESIGN.md).
+For full design rationale, every parameter, and a record of every problem we
+hit and how we resolved it, see [`DESIGN.md`](DESIGN.md).
 
 ---
 
 ## What works today
 
-- Upload a **text PDF**, a **scanned PDF**, or paste a **YouTube URL** and chat about it in the browser
-- **Text PDFs**: page text via PyMuPDF, tables extracted separately via pdfplumber
-- **Scanned PDFs**: page rasterization via PyMuPDF + EasyOCR (English; Hindi available as a config toggle)
-- **YouTube**: auto-generated transcripts via `youtube-transcript-api` (no API key, no quota)
-- Manual doc-type router in the sidebar (auto-detect comes in Phase 4)
-- Local BGE-small embeddings (no embedding-API cost)
-- Persistent ChromaDB store with HNSW cosine index
-- **MMR retrieval** — diversifies top-k results to avoid near-duplicates
-- LCEL RAG chain (`ChatPromptTemplate` + retriever + LLM + `StrOutputParser`)
-- **Multi-provider LLM**: Groq Llama 3.3 70B for text RAG (fast, free-tier-friendly), Gemini 2.5 Flash reserved for Phase 3 vision
-- "Clear store" control to reset between documents
+| Input type | Pipeline | Engine |
+|---|---|---|
+| Text PDF | text + tables | PyMuPDF + pdfplumber |
+| Scanned PDF | OCR (typed text) | EasyOCR |
+| Image (text) | OCR on a photo/screenshot of text | EasyOCR |
+| Visual / Handwritten | description of charts, diagrams, handwriting; accepts images **and** PDFs | Gemini Vision |
+| Invoice / Form | structured field extraction; accepts images **and** PDFs | Gemini Vision + `with_structured_output` |
+| YouTube | auto-generated transcript | youtube-transcript-api |
+
+All six converge on the same core: chunk → BGE-small embeddings → ChromaDB →
+MMR retrieval → LCEL chain → Groq Llama 3.3 70B answer.
 
 ---
 
 ## Tech stack
 
-| Layer                  | Tool                                          |
-|------------------------|-----------------------------------------------|
-| UI                     | Streamlit                                     |
-| Orchestration          | LangChain (LCEL Runnables)                    |
-| Text extraction        | PyMuPDF                                       |
-| Table extraction       | pdfplumber                                    |
-| OCR                    | EasyOCR (CRAFT + CRNN)                        |
-| YouTube transcripts    | youtube-transcript-api                        |
-| Embeddings             | BGE-small-en-v1.5 (sentence-transformers)     |
-| Vector store           | ChromaDB (HNSW, cosine)                       |
-| Retrieval              | MMR (Maximal Marginal Relevance)              |
-| LLM (text RAG)         | Groq Llama 3.3 70B                            |
-| LLM (vision, Phase 3)  | Gemini 2.5 Flash                              |
+| Layer | Tool |
+|---|---|
+| UI | Streamlit |
+| Orchestration | LangChain (LCEL) |
+| Text extraction | PyMuPDF |
+| Table extraction | pdfplumber |
+| OCR | EasyOCR (CRAFT + CRNN) |
+| Vision | Gemini 2.5 Flash |
+| YouTube transcripts | youtube-transcript-api |
+| Embeddings | BGE-small-en-v1.5 (local, 384-dim) |
+| Vector store | ChromaDB (HNSW, cosine) |
+| Retrieval | MMR |
+| LLM (text RAG) | Groq Llama 3.3 70B |
 
 ---
 
 ## Setup
 
 ```bash
-# 1. Clone
 git clone https://github.com/<you>/multimodal-document-intelligence-system.git
 cd multimodal-document-intelligence-system
 
-# 2. Virtual env (Python 3.10+)
 python -m venv venv
-# Windows
-venv\Scripts\activate
-# macOS / Linux
-source venv/bin/activate
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS / Linux
 
-# 3. Install
 pip install -r requirements.txt
-
-# 4. API keys (both free, no card)
-#    Groq:   https://console.groq.com/keys
-#    Gemini: https://aistudio.google.com/apikey
-# Add both to .env at project root:
-#   GROQ_API_KEY=gsk_...
-#   GOOGLE_API_KEY=...
-
-# 5. Run the UI
-streamlit run frontend/streamlit_app.py
 ```
 
-For a terminal-only Q&A loop on text PDFs: `python main.py`
-(expects a PDF at `data/samples/sample.pdf`).
+Two free API keys go in a `.env` file at the project root:
+```
+GROQ_API_KEY=gsk_...           # https://console.groq.com/keys   (text RAG)
+GOOGLE_API_KEY=...             # https://aistudio.google.com/apikey (vision)
+```
 
-First-run notes: ~130 MB of BGE-small embedding weights and ~120 MB of EasyOCR
-models download on first use and are cached locally; subsequent runs are
-offline for those layers. Groq inference is API-based — no local model.
+Run the UI:
+```bash
+streamlit run frontend/streamlit_app.py
+```
+Terminal-only Q&A on a text PDF: `python main.py` (expects `data/samples/sample.pdf`).
+
+First run downloads ~130 MB (BGE-small) and ~120 MB (EasyOCR), cached locally
+thereafter. Groq and Gemini are API-based (no local model).
 
 ---
 
@@ -88,68 +81,63 @@ offline for those layers. Groq inference is API-based — no local model.
 
 ```
 backend/
-  config/settings.py                  central config
+  config/settings.py
   rag/
-    embeddings.py                     BGE-small factory
-    chunking.py                       recursive splitter + chunk_index
-    vectorstore.py                    persistent Chroma, HNSW cosine
-    retriever.py                      MMR retriever
-    chain.py                          LCEL RAG chain
-    llm.py                            LLM factory (Groq for text, Gemini for vision)
+    embeddings.py  chunking.py  vectorstore.py
+    retriever.py   chain.py     llm.py            (Groq for text, Gemini for vision)
   services/pipelines/
-    text_pdf.py                       PyMuPDF text + pdfplumber tables
-    scanned.py                        PyMuPDF rasterize + EasyOCR
-    youtube.py                        YouTube transcript fetch
-frontend/
-  streamlit_app.py                    UI with doc-type router (file + URL inputs)
-data/
-  samples/                            source PDFs
-  uploads/                            UI-uploaded files (gitignored)
-  chroma_db/                          persistent vectors (gitignored)
-main.py                               CLI Q&A runner (text PDFs)
-requirements.txt
-DESIGN.md                             detailed design rationale
+    text_pdf.py        PyMuPDF text + pdfplumber tables
+    scanned.py         PyMuPDF rasterize + EasyOCR
+    image_ocr.py       EasyOCR on a direct image upload
+    image_vision.py    Gemini Vision description (images + PDFs)
+    invoice.py         Gemini Vision structured extraction (images + PDFs)
+    youtube.py         transcript fetch
+    _vision_io.py      shared: file -> base64 image(s)  (DRY helper)
+frontend/streamlit_app.py
+data/  samples/  uploads/(gitignored)  chroma_db/(gitignored)
+main.py  requirements.txt  README.md  DESIGN.md  .env(gitignored)
 ```
 
 ---
 
 ## Roadmap
 
-- [x] **Phase 1** — Text PDFs (text + tables), persistent RAG, LCEL chain, Streamlit UI
-- [x] **Phase 2** — EasyOCR pipeline for scanned PDFs + manual doc-type router
-- [x] **Phase 2.5** — Multi-provider LLM factory (Groq + Gemini), YouTube transcript pipeline, MMR retrieval
-- [ ] **Phase 3** — Gemini Vision for invoices, forms, embedded images, and complex/handwritten scans
-- [ ] **Phase 4** — Auto document router (heuristic detect + user override)
-- [ ] **Phase 5** — FastAPI backend separation
-- [ ] **Phase 6** — Per-session conversation memory (history-aware retrieval)
-- [ ] **Phase 7** — Docker + docker-compose
-- [ ] **Phase 8** — Citations / source attribution, evaluation suite, UI polish
+- [x] **Phase 1** - Text PDFs (text + tables), persistent RAG, LCEL chain, UI
+- [x] **Phase 2** - EasyOCR for scanned PDFs + manual doc-type router
+- [x] **Phase 2.5** - Multi-LLM factory (Groq + Gemini), YouTube pipeline, MMR
+- [x] **Phase 3** - Gemini Vision: image description, invoice structured extraction, PDF support for vision
+- [ ] **Phase 4** - Per-document metadata filtering + auto doc-type router
+- [ ] **Phase 5** - FastAPI backend separation
+- [ ] **Phase 6** - Conversation memory (history-aware retrieval)
+- [ ] **Phase 7** - Docker + docker-compose
+- [ ] **Phase 8** - Citations, evaluation suite, UI polish
 
 ---
 
-## Future upgrades
+## Known limitations (current state)
 
-- OCR: EasyOCR → Surya (better layout and reading-order detection)
-- Embeddings: BGE-small-en → BGE-M3 or multilingual-e5 (full multilingual RAG)
-- Retrieval: add BM25 hybrid + RRF fusion, optional BGE-Reranker second stage
-- Memory: ConversationBufferWindowMemory → ConversationSummaryBufferMemory
-- Vector DB: ChromaDB → Qdrant (production-grade, built-in hybrid)
-- Local LLM stack: Groq → Ollama (Llama 3.x) for a fully-offline deployment
-- Web page loader: a thin pipeline using `WebBaseLoader` for any URL
+Documented honestly; several are deliberate scope decisions. Full analysis in
+[`DESIGN.md`](DESIGN.md).
+
+- **Multi-document interference** - retrieval searches across all stored docs, so
+  unrelated chunks can crowd out relevant ones. *Fix scheduled: Phase 4 per-document filtering.*
+- **Aggregation/counting over a whole document** is unreliable (RAG retrieves
+  relevant passages, not the full document). *Left as a documented limitation;
+  proper fix is table-QA / text-to-SQL, out of scope.*
+- **Handwriting / complex layout** route to Gemini Vision, not EasyOCR.
+- **No conversation memory** yet (Phase 6); **no citations** yet (Phase 8).
+- **YouTube transcripts** can be blocked from cloud IPs (works locally; needs a residential proxy on cloud VMs).
+- **Vision will not assert the identity of a depicted person/character** - by design; it reads visible text instead.
 
 ---
 
 ## Design highlights
 
-For full rationale on every parameter and tool, see [`DESIGN.md`](DESIGN.md).
-Quick summary of the most interview-worthy decisions:
+For full rationale and the problem-resolution log, see [`DESIGN.md`](DESIGN.md).
 
-- **Tiered OCR strategy** — EasyOCR for typed scans (free, local, unlimited); Gemini Vision (Phase 3) for handwriting, structured extraction, and visual content. Two tools because they're optimized for different shapes of input, not because one is "better."
-- **LLM factory** — `get_llm("text")` returns Groq Llama 3.3 70B; `get_llm("vision")` returns Gemini 2.5 Flash. The rest of the codebase is provider-agnostic.
-- **ChromaDB over FAISS** — native metadata storage and filtering, per-collection isolation, HNSW indexing without separate setup.
-- **BGE-small (local) over OpenAI embeddings** — free, runs on CPU, no API key, no rate limit on the embedding layer.
-- **MMR retrieval over plain cosine** — diversifies top-k to avoid four near-duplicate chunks landing in the LLM's context.
-- **pdfplumber alongside PyMuPDF** — complementary, not alternative; tables run on different scaffolding from prose.
-- **LCEL over `ConversationalRetrievalChain`** — current pattern; the legacy chain is deprecated. LCEL also composes cleanly for Phase 6 memory and Phase 8 citations.
-- **YouTube via youtube-transcript-api** — free, no API key; demonstrates the Document-as-universal-contract architecture (totally new data source = one new file).
-- **Manual doc-type router for now** — heuristic auto-detection lives in Phase 4. Shipping dispatch before detection means the routing is tested before the smarts go on top.
+- **Tiered OCR/Vision strategy** - EasyOCR for typed scans (free, local, unlimited); Gemini Vision for handwriting, structured extraction, and visual content. Right tool per input shape, not "which is better."
+- **LLM factory** - `get_llm("text")` → Groq, `get_llm("vision")` → Gemini; the rest of the code is provider-agnostic.
+- **Structured vs unstructured output** - invoices/forms get a Pydantic schema (queryable fields); arbitrary images get a natural-language description (no schema).
+- **Near-lossless structured extraction** - an `additional_details` catch-all field captures everything the fixed schema would otherwise drop.
+- **Document-as-universal-contract** - every pipeline emits the same `Document` shape, so new input types don't touch the downstream core.
+- **Measured limitations** - multi-document interference and aggregation failures were found by controlled testing and documented, not hidden.

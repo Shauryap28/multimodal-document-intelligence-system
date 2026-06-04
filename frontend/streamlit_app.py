@@ -3,11 +3,9 @@
 Run from project root:
     streamlit run frontend/streamlit_app.py
 
-Phase 2.5+:
-  - Multi-provider LLM (Groq for text, Gemini reserved for Phase 3 vision)
-  - YouTube transcript pipeline (URL input)
-  - Image-of-text pipeline (.jpg / .png / etc. via EasyOCR)
-  - Doc-type registry now carries per-entry file_types
+Phase 3 (complete):
+  - Image (visual)  -> Gemini Vision description (unstructured)
+  - Invoice / Form  -> Gemini Vision + with_structured_output (structured fields)
 """
 import os
 import sys
@@ -28,6 +26,8 @@ from backend.rag.llm import get_llm
 from backend.services.pipelines.text_pdf import load_text_pdf
 from backend.services.pipelines.scanned import load_scanned_pdf
 from backend.services.pipelines.image_ocr import load_image
+from backend.services.pipelines.image_vision import load_image_vision
+from backend.services.pipelines.invoice import load_invoice
 from backend.services.pipelines.youtube import load_youtube_transcript
 
 st.set_page_config(
@@ -37,8 +37,6 @@ st.set_page_config(
 )
 
 # --- Pipeline registry ---
-# Each entry: loader fn + input kind ("file" or "url") + accepted file_types
-# (only used for file inputs) + a short hint shown under the radio.
 DOC_TYPES = {
     "Text PDF": {
         "loader": load_text_pdf,
@@ -56,7 +54,19 @@ DOC_TYPES = {
         "loader": load_image,
         "input": "file",
         "file_types": ["png", "jpg", "jpeg", "webp", "bmp"],
-        "hint": "Photo or screenshot of typed text - book page, sign, document image. Uses EasyOCR.",
+        "hint": "Photo/screenshot of typed text. Uses EasyOCR (free, local).",
+    },
+    "Visual / Handwritten": {
+        "loader": load_image_vision,
+        "input": "file",
+        "file_types": ["pdf", "png", "jpg", "jpeg", "webp", "bmp"],
+        "hint": "Charts, diagrams, handwriting, photos, complex/handwritten PDFs. Gemini Vision (1 call per page).",
+    },
+    "Invoice / Form": {
+        "loader": load_invoice,
+        "input": "file",
+        "file_types": ["pdf", "png", "jpg", "jpeg", "webp"],
+        "hint": "Receipts, bills, forms. Gemini Vision extracts structured fields (vendor, total, items).",
     },
     "YouTube": {
         "loader": load_youtube_transcript,
@@ -74,7 +84,6 @@ if not settings.GROQ_API_KEY:
     st.stop()
 
 
-# --- Heavy resources cached across reruns ---
 @st.cache_resource
 def get_resources():
     embeddings = get_embeddings()
@@ -86,7 +95,23 @@ def get_resources():
 embeddings, vectorstore, llm = get_resources()
 
 
-# --- Sidebar: source picker + processor ---
+def ingest(docs):
+    if not docs:
+        return 0
+    chunks = chunk_documents(docs)
+    add_documents(vectorstore, chunks)
+    return len(chunks)
+
+
+# Spinner copy per pipeline
+_SPINNERS = {
+    "Scanned PDF": "OCR'ing {name}...",
+    "Image (text)": "OCR'ing {name}...",
+    "Visual / Handwritten": "Asking Gemini Vision to read {name}...",
+    "Invoice / Form": "Extracting structured fields from {name} with Gemini Vision...",
+}
+
+
 with st.sidebar:
     st.header("Document")
 
@@ -106,24 +131,23 @@ with st.sidebar:
             with open(save_path, "wb") as f:
                 f.write(uploaded.getbuffer())
 
-            if doc_type_label == "Scanned PDF":
-                spinner_msg = f"OCR'ing {uploaded.name}... this can take a while on CPU."
-            elif doc_type_label == "Image (text)":
-                spinner_msg = f"OCR'ing {uploaded.name}..."
-            else:
-                spinner_msg = f"Ingesting {uploaded.name}..."
-
+            spinner_msg = _SPINNERS.get(doc_type_label, "Ingesting {name}...").format(
+                name=uploaded.name
+            )
             with st.spinner(spinner_msg):
-                docs = config["loader"](save_path)
-                if not docs:
-                    st.warning("No text could be recovered from this file.")
+                try:
+                    docs = config["loader"](save_path)
+                except Exception as e:
+                    st.error(f"Could not process file: {e}")
                     st.stop()
-                chunks = chunk_documents(docs)
-                add_documents(vectorstore, chunks)
+                n = ingest(docs)
 
-            st.success(f"Indexed {len(chunks)} chunks from {uploaded.name}")
-            st.session_state.messages = []
-            st.rerun()
+            if n == 0:
+                st.warning("No usable content could be recovered from this file.")
+            else:
+                st.success(f"Indexed {n} chunks from {uploaded.name}")
+                st.session_state.messages = []
+                st.rerun()
 
     elif config["input"] == "url":
         url = st.text_input(
@@ -134,13 +158,11 @@ with st.sidebar:
             with st.spinner("Fetching transcript and indexing..."):
                 try:
                     docs = config["loader"](url)
-                    chunks = chunk_documents(docs)
-                    add_documents(vectorstore, chunks)
                 except Exception as e:
                     st.error(f"Could not process video: {e}")
                     st.stop()
-
-            st.success(f"Indexed {len(chunks)} chunks from the video transcript")
+                n = ingest(docs)
+            st.success(f"Indexed {n} chunks from the video transcript")
             st.session_state.messages = []
             st.rerun()
 
@@ -153,10 +175,10 @@ with st.sidebar:
         st.rerun()
 
 
-# --- Main: chat ---
 st.title("📄 Multimodal Document Intelligence")
 st.caption(
-    "Phase 2.5+ · PDFs + Scans + Images + YouTube · BGE-small · ChromaDB · Groq Llama 3.3 70B"
+    "Phase 3 · PDFs + Scans + Images (OCR/Vision) + Invoices + YouTube · "
+    "BGE-small · ChromaDB · Groq + Gemini"
 )
 
 if "messages" not in st.session_state:
@@ -166,10 +188,10 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
 
-prompt = st.chat_input("Ask a question about your document, image, or video")
+prompt = st.chat_input("Ask a question about your document, image, invoice, or video")
 if prompt:
     if count(vectorstore) == 0:
-        st.warning("Process a document, image, or video first.")
+        st.warning("Process something first.")
         st.stop()
 
     st.session_state.messages.append({"role": "user", "content": prompt})
