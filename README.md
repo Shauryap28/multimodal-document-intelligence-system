@@ -2,14 +2,16 @@
 
 A RAG system for chatting with documents across many types and sources - text
 PDFs, scanned pages, standalone images (typed or visual), invoices/forms, and
-YouTube videos. Built as a portfolio project for placements (ML / SDE roles).
+YouTube videos. Ask questions in natural language and get answers grounded in
+whatever you fed in.
 
 > **Status:** Phase 3 complete. Six ingestion pipelines, two LLM providers
 > (Groq for text, Gemini for vision), structured and unstructured extraction,
 > a manual doc-type router, and a Streamlit chat UI. See [Roadmap](#roadmap).
 
-For full design rationale, every parameter, and a record of every problem we
-hit and how we resolved it, see [`DESIGN.md`](DESIGN.md).
+For full design rationale, every parameter, technology choices with
+alternatives, and a record of every problem and how it was resolved, see
+[`DESIGN.md`](DESIGN.md).
 
 ---
 
@@ -62,8 +64,8 @@ pip install -r requirements.txt
 
 Two free API keys go in a `.env` file at the project root:
 ```
-GROQ_API_KEY=gsk_...           # https://console.groq.com/keys   (text RAG)
-GOOGLE_API_KEY=...             # https://aistudio.google.com/apikey (vision)
+GROQ_API_KEY=gsk_...           # https://console.groq.com/keys      (text RAG)
+GOOGLE_API_KEY=...             # https://aistudio.google.com/apikey  (vision)
 ```
 
 Run the UI:
@@ -133,11 +135,13 @@ Documented honestly; several are deliberate scope decisions. Full analysis in
 
 ## Design highlights
 
-For full rationale and the problem-resolution log, see [`DESIGN.md`](DESIGN.md).
+For full rationale, technology choices, and the problem-resolution log, see
+[`DESIGN.md`](DESIGN.md).
 
 - **Tiered OCR/Vision strategy** - EasyOCR for typed scans (free, local, unlimited); Gemini Vision for handwriting, structured extraction, and visual content. Right tool per input shape, not "which is better."
 - **LLM factory** - `get_llm("text")` → Groq, `get_llm("vision")` → Gemini; the rest of the code is provider-agnostic.
 - **Structured vs unstructured output** - invoices/forms get a Pydantic schema (queryable fields); arbitrary images get a natural-language description (no schema).
 - **Near-lossless structured extraction** - an `additional_details` catch-all field captures everything the fixed schema would otherwise drop.
+- **ChromaDB over FAISS** - native metadata storage and filtering, persistence, and HNSW indexing without a separate server; FAISS would mean rebuilding all of that for speed we can't feel at this scale.
 - **Document-as-universal-contract** - every pipeline emits the same `Document` shape, so new input types don't touch the downstream core.
 - **Measured limitations** - multi-document interference and aggregation failures were found by controlled testing and documented, not hidden.
