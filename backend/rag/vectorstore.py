@@ -1,17 +1,16 @@
-"""Persistent ChromaDB vector store.
+"""Persistent ChromaDB vector store with an HNSW cosine index.
 
-Chroma builds an HNSW (approximate-nearest-neighbour) index automatically
-as documents are added. We set the distance metric to cosine to match the
-normalized BGE embeddings. With persist_directory set, vectors are written
-to disk and reloaded on the next run - so we embed each document only once.
+Phase 4 adds list_documents() and delete_document(): the document list is
+DERIVED from chunk metadata (the store is the single source of truth, so it
+can never drift from what's actually indexed), and deletion can now target a
+single document instead of wiping everything.
 """
 from langchain_chroma import Chroma
-from langchain_core.documents import Document
 
 from backend.config import settings
 
 
-def get_vectorstore(embeddings) -> Chroma:
+def get_vectorstore(embeddings):
     return Chroma(
         collection_name=settings.COLLECTION_NAME,
         embedding_function=embeddings,
@@ -20,16 +19,42 @@ def get_vectorstore(embeddings) -> Chroma:
     )
 
 
-def add_documents(vectorstore: Chroma, chunks: list[Document]) -> None:
-    vectorstore.add_documents(chunks)
+def add_documents(vectorstore, documents):
+    vectorstore.add_documents(documents)
 
 
-def count(vectorstore: Chroma) -> int:
-    """Number of chunks currently stored (0 == empty / not yet ingested)."""
+def count(vectorstore) -> int:
     return vectorstore._collection.count()
 
-def clear(vectorstore: Chroma) -> None:
-    """Delete every chunk from the store (used by the UI's 'Clear store' button)."""
-    ids = vectorstore.get()["ids"]
+
+def clear(vectorstore):
+    """Remove ALL chunks from the store."""
+    data = vectorstore.get()
+    ids = data.get("ids", [])
     if ids:
         vectorstore.delete(ids=ids)
+
+
+def list_documents(vectorstore) -> list[str]:
+    """Distinct doc_name values currently in the store (for the query-scope picker).
+
+    Derived from chunk metadata so it always matches what's actually indexed.
+    Reads all metadata - fine at our scale; a very large store would keep a
+    maintained registry instead.
+    """
+    data = vectorstore.get(include=["metadatas"])
+    names = {
+        m.get("doc_name")
+        for m in data.get("metadatas", [])
+        if m and m.get("doc_name")
+    }
+    return sorted(names)
+
+
+def delete_document(vectorstore, doc_name: str) -> int:
+    """Delete all chunks belonging to one document. Returns how many were removed."""
+    data = vectorstore.get(where={"doc_name": doc_name})
+    ids = data.get("ids", [])
+    if ids:
+        vectorstore.delete(ids=ids)
+    return len(ids)
