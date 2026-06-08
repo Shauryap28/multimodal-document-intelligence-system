@@ -5,9 +5,10 @@ PDFs, scanned pages, standalone images (typed or visual), invoices/forms, and
 YouTube videos. Ask questions in natural language and get answers grounded in
 whatever you fed in.
 
-> **Status:** Phase 3 complete. Six ingestion pipelines, two LLM providers
-> (Groq for text, Gemini for vision), structured and unstructured extraction,
-> a manual doc-type router, and a Streamlit chat UI. See [Roadmap](#roadmap).
+> **Status:** Phase 4 complete. Six ingestion pipelines, two LLM providers
+> (Groq for text, Gemini for vision), structured and unstructured extraction, a
+> manual doc-type router, per-document query scoping, and a Streamlit chat UI.
+> See [Roadmap](#roadmap).
 
 For full design rationale, every parameter, technology choices with
 alternatives, and a record of every problem and how it was resolved, see
@@ -29,6 +30,11 @@ alternatives, and a record of every problem and how it was resolved, see
 All six converge on the same core: chunk → BGE-small embeddings → ChromaDB →
 MMR retrieval → LCEL chain → Groq Llama 3.3 70B answer.
 
+**Retrieval & management features:**
+- **Per-document query scoping** - ask within one document (metadata filter) or across all
+- **Per-document delete** - remove one document without clearing the whole store
+- **Duplicate-ingestion guard** - a document already indexed is not silently added twice
+
 ---
 
 ## Tech stack
@@ -44,7 +50,7 @@ MMR retrieval → LCEL chain → Groq Llama 3.3 70B answer.
 | YouTube transcripts | youtube-transcript-api |
 | Embeddings | BGE-small-en-v1.5 (local, 384-dim) |
 | Vector store | ChromaDB (HNSW, cosine) |
-| Retrieval | MMR |
+| Retrieval | MMR + optional per-document metadata filter |
 | LLM (text RAG) | Groq Llama 3.3 70B |
 
 ---
@@ -85,7 +91,7 @@ thereafter. Groq and Gemini are API-based (no local model).
 backend/
   config/settings.py
   rag/
-    embeddings.py  chunking.py  vectorstore.py
+    embeddings.py  chunking.py  vectorstore.py    (+ list_documents, delete_document)
     retriever.py   chain.py     llm.py            (Groq for text, Gemini for vision)
   services/pipelines/
     text_pdf.py        PyMuPDF text + pdfplumber tables
@@ -108,11 +114,17 @@ main.py  requirements.txt  README.md  DESIGN.md  .env(gitignored)
 - [x] **Phase 2** - EasyOCR for scanned PDFs + manual doc-type router
 - [x] **Phase 2.5** - Multi-LLM factory (Groq + Gemini), YouTube pipeline, MMR
 - [x] **Phase 3** - Gemini Vision: image description, invoice structured extraction, PDF support for vision
-- [ ] **Phase 4** - Per-document metadata filtering + auto doc-type router
-- [ ] **Phase 5** - FastAPI backend separation
-- [ ] **Phase 6** - Conversation memory (history-aware retrieval)
-- [ ] **Phase 7** - Docker + docker-compose
-- [ ] **Phase 8** - Citations, evaluation suite, UI polish
+- [x] **Phase 4** - Per-document query scoping (metadata filter) + per-document delete + duplicate guard
+- [ ] **Phase 5** - Evaluation suite (context recall + answer correctness)  ← next
+- [ ] **Phase 6** - Citations / source attribution
+- [ ] **Phase 7** - Conversation memory (history-aware retrieval)
+- [ ] **Phase 8** - FastAPI backend separation
+- [ ] **Phase 9** - Docker + docker-compose
+- [ ] **Future** - Auto doc-type router (heuristic detection); reranker (add only if measured to help); multilingual embeddings (BGE-M3)
+
+Ordering note: the evaluation suite comes before the packaging phases (FastAPI,
+Docker) on purpose - it's the measurement foundation that lets every later
+change be judged on numbers, and packaging doesn't affect answer quality.
 
 ---
 
@@ -121,15 +133,17 @@ main.py  requirements.txt  README.md  DESIGN.md  .env(gitignored)
 Documented honestly; several are deliberate scope decisions. Full analysis in
 [`DESIGN.md`](DESIGN.md).
 
-- **Multi-document interference** - retrieval searches across all stored docs, so
-  unrelated chunks can crowd out relevant ones. *Fix scheduled: Phase 4 per-document filtering.*
 - **Aggregation/counting over a whole document** is unreliable (RAG retrieves
   relevant passages, not the full document). *Left as a documented limitation;
   proper fix is table-QA / text-to-SQL, out of scope.*
 - **Handwriting / complex layout** route to Gemini Vision, not EasyOCR.
-- **No conversation memory** yet (Phase 6); **no citations** yet (Phase 8).
+- **No conversation memory** yet (Phase 7); **no citations** yet (Phase 6).
+- **No automated evaluation** yet (Phase 5).
 - **YouTube transcripts** can be blocked from cloud IPs (works locally; needs a residential proxy on cloud VMs).
 - **Vision will not assert the identity of a depicted person/character** - by design; it reads visible text instead.
+
+> Multi-document interference (retrieval pulling unrelated chunks) was a measured
+> limitation in earlier phases - **fixed in Phase 4** via per-document query scoping.
 
 ---
 
@@ -142,6 +156,7 @@ For full rationale, technology choices, and the problem-resolution log, see
 - **LLM factory** - `get_llm("text")` → Groq, `get_llm("vision")` → Gemini; the rest of the code is provider-agnostic.
 - **Structured vs unstructured output** - invoices/forms get a Pydantic schema (queryable fields); arbitrary images get a natural-language description (no schema).
 - **Near-lossless structured extraction** - an `additional_details` catch-all field captures everything the fixed schema would otherwise drop.
+- **Per-document scoping via pre-filtering** - the document filter is applied inside the vector search (Chroma `where`), not after, so you always get k results from the right document.
 - **ChromaDB over FAISS** - native metadata storage and filtering, persistence, and HNSW indexing without a separate server; FAISS would mean rebuilding all of that for speed we can't feel at this scale.
 - **Document-as-universal-contract** - every pipeline emits the same `Document` shape, so new input types don't touch the downstream core.
-- **Measured limitations** - multi-document interference and aggregation failures were found by controlled testing and documented, not hidden.
+- **Measured limitations** - multi-document interference and aggregation failures were found by controlled testing and documented (and the first was then fixed), not hidden.
