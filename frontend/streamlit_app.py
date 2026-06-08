@@ -3,9 +3,8 @@
 Run from project root:
     streamlit run frontend/streamlit_app.py
 
-Phase 3 (complete):
-  - Image (visual)  -> Gemini Vision description (unstructured)
-  - Invoice / Form  -> Gemini Vision + with_structured_output (structured fields)
+Phase 4: per-document query scoping + per-document delete + duplicate-ingestion
+guard (a document already in the store is not silently indexed a second time).
 """
 import os
 import sys
@@ -19,7 +18,10 @@ import streamlit as st
 from backend.config import settings
 from backend.rag.embeddings import get_embeddings
 from backend.rag.chunking import chunk_documents
-from backend.rag.vectorstore import get_vectorstore, add_documents, count, clear
+from backend.rag.vectorstore import (
+    get_vectorstore, add_documents, count, clear,
+    list_documents, delete_document,
+)
 from backend.rag.retriever import get_retriever
 from backend.rag.chain import build_qa_chain
 from backend.rag.llm import get_llm
@@ -39,40 +41,39 @@ st.set_page_config(
 # --- Pipeline registry ---
 DOC_TYPES = {
     "Text PDF": {
-        "loader": load_text_pdf,
-        "input": "file",
-        "file_types": ["pdf"],
+        "loader": load_text_pdf, "input": "file", "file_types": ["pdf"],
         "hint": "Selectable text - reports, papers, books. Tables handled automatically.",
     },
     "Scanned PDF": {
-        "loader": load_scanned_pdf,
-        "input": "file",
-        "file_types": ["pdf"],
+        "loader": load_scanned_pdf, "input": "file", "file_types": ["pdf"],
         "hint": "Scanned pages / no selectable text. Uses EasyOCR (slow, runs on CPU).",
     },
     "Image (text)": {
-        "loader": load_image,
-        "input": "file",
+        "loader": load_image, "input": "file",
         "file_types": ["png", "jpg", "jpeg", "webp", "bmp"],
         "hint": "Photo/screenshot of typed text. Uses EasyOCR (free, local).",
     },
     "Visual / Handwritten": {
-        "loader": load_image_vision,
-        "input": "file",
+        "loader": load_image_vision, "input": "file",
         "file_types": ["pdf", "png", "jpg", "jpeg", "webp", "bmp"],
         "hint": "Charts, diagrams, handwriting, photos, complex/handwritten PDFs. Gemini Vision (1 call per page).",
     },
     "Invoice / Form": {
-        "loader": load_invoice,
-        "input": "file",
+        "loader": load_invoice, "input": "file",
         "file_types": ["pdf", "png", "jpg", "jpeg", "webp"],
         "hint": "Receipts, bills, forms. Gemini Vision extracts structured fields (vendor, total, items).",
     },
     "YouTube": {
-        "loader": load_youtube_transcript,
-        "input": "url",
+        "loader": load_youtube_transcript, "input": "url",
         "hint": "Paste a YouTube URL. Uses the video's auto-generated transcript.",
     },
+}
+
+_SPINNERS = {
+    "Scanned PDF": "OCR'ing {name}...",
+    "Image (text)": "OCR'ing {name}...",
+    "Visual / Handwritten": "Asking Gemini Vision to read {name}...",
+    "Invoice / Form": "Extracting structured fields from {name} with Gemini Vision...",
 }
 
 # --- API key check ---
@@ -93,6 +94,7 @@ def get_resources():
 
 
 embeddings, vectorstore, llm = get_resources()
+docs_in_store = list_documents(vectorstore)
 
 
 def ingest(docs):
@@ -103,22 +105,13 @@ def ingest(docs):
     return len(chunks)
 
 
-# Spinner copy per pipeline
-_SPINNERS = {
-    "Scanned PDF": "OCR'ing {name}...",
-    "Image (text)": "OCR'ing {name}...",
-    "Visual / Handwritten": "Asking Gemini Vision to read {name}...",
-    "Invoice / Form": "Extracting structured fields from {name} with Gemini Vision...",
-}
-
-
+# --- Sidebar ---
 with st.sidebar:
-    st.header("Document")
-
+    st.header("Add a document")
     doc_type_label = st.radio(
         "What kind of input?",
         list(DOC_TYPES.keys()),
-        help="Manual router. Auto-detect comes in Phase 4.",
+        help="Manual router. Auto-detect is a future enhancement.",
     )
     config = DOC_TYPES[doc_type_label]
     st.caption(config["hint"])
@@ -126,11 +119,19 @@ with st.sidebar:
     if config["input"] == "file":
         uploaded = st.file_uploader("Upload file", type=config["file_types"])
         if uploaded is not None and st.button("Process", type="primary"):
+            # Duplicate guard (cheap, before the expensive loader runs):
+            # a file's doc_name is its filename, so we can check up front.
+            if uploaded.name in docs_in_store:
+                st.warning(
+                    f"'{uploaded.name}' is already indexed. "
+                    "Delete it in Manage first if you want to re-ingest."
+                )
+                st.stop()
+
             os.makedirs("data/uploads", exist_ok=True)
             save_path = os.path.join("data/uploads", uploaded.name)
             with open(save_path, "wb") as f:
                 f.write(uploaded.getbuffer())
-
             spinner_msg = _SPINNERS.get(doc_type_label, "Ingesting {name}...").format(
                 name=uploaded.name
             )
@@ -141,7 +142,6 @@ with st.sidebar:
                     st.error(f"Could not process file: {e}")
                     st.stop()
                 n = ingest(docs)
-
             if n == 0:
                 st.warning("No usable content could be recovered from this file.")
             else:
@@ -150,10 +150,7 @@ with st.sidebar:
                 st.rerun()
 
     elif config["input"] == "url":
-        url = st.text_input(
-            "YouTube URL",
-            placeholder="https://www.youtube.com/watch?v=...",
-        )
+        url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
         if url and st.button("Process video", type="primary"):
             with st.spinner("Fetching transcript and indexing..."):
                 try:
@@ -161,24 +158,47 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Could not process video: {e}")
                     st.stop()
+                # Duplicate guard: the video's doc_name (youtube:<id>) is known
+                # only after loading, so we check here, before adding.
+                doc_name = docs[0].metadata.get("doc_name") if docs else None
+                if doc_name and doc_name in docs_in_store:
+                    st.warning(f"This video ({doc_name}) is already indexed.")
+                    st.stop()
                 n = ingest(docs)
             st.success(f"Indexed {n} chunks from the video transcript")
             st.session_state.messages = []
             st.rerun()
 
     st.divider()
+    st.header("Manage")
     st.metric("Chunks in store", count(vectorstore))
+    st.caption(f"{len(docs_in_store)} document(s) indexed")
 
-    if st.button("Clear store"):
+    if docs_in_store:
+        to_delete = st.selectbox("Delete a document", ["-"] + docs_in_store)
+        if to_delete != "-" and st.button("Delete selected"):
+            removed = delete_document(vectorstore, to_delete)
+            st.success(f"Deleted {removed} chunks from {to_delete}")
+            st.session_state.messages = []
+            st.rerun()
+
+    if st.button("Clear entire store"):
         clear(vectorstore)
         st.session_state.messages = []
         st.rerun()
 
 
+# --- Main ---
 st.title("📄 Multimodal Document Intelligence")
 st.caption(
-    "Phase 3 · PDFs + Scans + Images (OCR/Vision) + Invoices + YouTube · "
-    "BGE-small · ChromaDB · Groq + Gemini"
+    "Phase 4 · per-document query scoping · PDFs + Scans + Images + Invoices + "
+    "YouTube · BGE-small · ChromaDB · Groq + Gemini"
+)
+
+scope = st.selectbox(
+    "Ask about",
+    ["All documents"] + docs_in_store,
+    help="Scope the question to one document to avoid interference from others.",
 )
 
 if "messages" not in st.session_state:
@@ -199,7 +219,8 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        retriever = get_retriever(vectorstore)
+        doc_filter = None if scope == "All documents" else scope
+        retriever = get_retriever(vectorstore, doc_name=doc_filter)
         chain = build_qa_chain(retriever, llm)
         with st.spinner("Thinking..."):
             answer = chain.invoke(prompt)
