@@ -5,10 +5,10 @@ PDFs, scanned pages, standalone images (typed or visual), invoices/forms, and
 YouTube videos. Ask questions in natural language and get answers grounded in
 whatever you fed in.
 
-> **Status:** Phase 4 complete. Six ingestion pipelines, two LLM providers
+> **Status:** Phase 5 complete. Six ingestion pipelines, two LLM providers
 > (Groq for text, Gemini for vision), structured and unstructured extraction, a
-> manual doc-type router, per-document query scoping, and a Streamlit chat UI.
-> See [Roadmap](#roadmap).
+> manual doc-type router, per-document query scoping, an evaluation suite, and a
+> Streamlit chat UI. See [Roadmap](#roadmap).
 
 For full design rationale, every parameter, technology choices with
 alternatives, and a record of every problem and how it was resolved, see
@@ -115,8 +115,8 @@ main.py  requirements.txt  README.md  DESIGN.md  .env(gitignored)
 - [x] **Phase 2.5** - Multi-LLM factory (Groq + Gemini), YouTube pipeline, MMR
 - [x] **Phase 3** - Gemini Vision: image description, invoice structured extraction, PDF support for vision
 - [x] **Phase 4** - Per-document query scoping (metadata filter) + per-document delete + duplicate guard
-- [ ] **Phase 5** - Evaluation suite (context recall + answer correctness)  ← next
-- [ ] **Phase 6** - Citations / source attribution
+- [x] **Phase 5** - Evaluation suite (context recall + answer correctness)
+- [ ] **Phase 6** - Citations / source attribution  ← next
 - [ ] **Phase 7** - Conversation memory (history-aware retrieval)
 - [ ] **Phase 8** - FastAPI backend separation
 - [ ] **Phase 9** - Docker + docker-compose
@@ -134,11 +134,11 @@ Documented honestly; several are deliberate scope decisions. Full analysis in
 [`DESIGN.md`](DESIGN.md).
 
 - **Aggregation/counting over a whole document** is unreliable (RAG retrieves
-  relevant passages, not the full document). *Left as a documented limitation;
-  proper fix is table-QA / text-to-SQL, out of scope.*
+  relevant passages, not the full document). *Measured in Phase 5 (aggregation
+  answer correctness 0/2 with retrieval recall 100%); proper fix is table-QA /
+  text-to-SQL, out of scope.*
 - **Handwriting / complex layout** route to Gemini Vision, not EasyOCR.
 - **No conversation memory** yet (Phase 7); **no citations** yet (Phase 6).
-- **No automated evaluation** yet (Phase 5).
 - **YouTube transcripts** can be blocked from cloud IPs (works locally; needs a residential proxy on cloud VMs).
 - **Vision will not assert the identity of a depicted person/character** - by design; it reads visible text instead.
 
