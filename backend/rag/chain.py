@@ -1,17 +1,19 @@
-"""LCEL RAG chain: prompt -> LLM -> StrOutputParser, fed by an MMR retriever.
+"""LCEL RAG chains.
 
-The chain reads each retrieved Document's page_content (NOT its metadata), so
-anything that must be answerable has to live in page_content.
+- build_qa_chain: returns just the answer string (used by the CLI and the eval
+  harness, which don't need sources).
+- build_qa_chain_with_sources: returns {"answer", "docs", "question"} so the UI
+  can show which documents/pages an answer was grounded in (Phase 6 citations).
 
-System prompt: stays grounded ("use only the context", "never invent facts")
-to prevent hallucination, but allows recognizing reasonable synonyms. The
-principle is stated generally and illustrated with cross-domain examples (an
-invoice term and a document term) so it applies to any input type - not just
-invoices - while still benefiting from concrete examples.
+Both read each retrieved Document's page_content (NOT its metadata), so anything
+that must be answerable has to live in page_content. The system prompt stays
+grounded but recognizes reasonable synonyms across domains.
 """
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import (
+    RunnablePassthrough, RunnableParallel, RunnableLambda,
+)
 
 
 _SYSTEM_PROMPT = (
@@ -31,18 +33,65 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _make_prompt():
+    return ChatPromptTemplate.from_messages([
+        ("system", _SYSTEM_PROMPT),
+        ("human", "Context:\n{context}\n\nQuestion: {question}"),
+    ])
+
+
 def _format_docs(docs) -> str:
     return "\n\n".join(d.page_content for d in docs)
 
 
 def build_qa_chain(retriever, llm):
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", _SYSTEM_PROMPT),
-        ("human", "Context:\n{context}\n\nQuestion: {question}"),
-    ])
+    """Returns a chain that produces just the answer string."""
+    prompt = _make_prompt()
     return (
         {"context": retriever | _format_docs, "question": RunnablePassthrough()}
         | prompt
         | llm
         | StrOutputParser()
     )
+
+
+def build_qa_chain_with_sources(retriever, llm):
+    """Returns a chain that produces {"docs", "question", "answer"}.
+
+    Retrieve once, keep the docs, generate the answer from them, and return both
+    - so the UI can cite the sources the answer was grounded in.
+    """
+    prompt = _make_prompt()
+
+    # docs = retrieved chunks; question passes through unchanged
+    retrieve = RunnableParallel(docs=retriever, question=RunnablePassthrough())
+
+    # add `answer` to the dict WITHOUT dropping docs/question
+    generate = RunnablePassthrough.assign(
+        answer=(
+            RunnableLambda(lambda x: {
+                "context": _format_docs(x["docs"]),
+                "question": x["question"],
+            })
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+    )
+
+    return retrieve | generate
+
+
+def format_sources(docs) -> list[str]:
+    """Distinct 'doc_name (page N)' labels from retrieved docs, for display.
+
+    Collapses multiple chunks of the same page into one entry.
+    """
+    seen: list[str] = []
+    for d in docs:
+        name = d.metadata.get("doc_name", "unknown")
+        page = d.metadata.get("page_number")
+        label = f"{name} (page {page})" if page else name
+        if label not in seen:
+            seen.append(label)
+    return seen
