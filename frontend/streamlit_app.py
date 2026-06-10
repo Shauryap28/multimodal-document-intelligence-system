@@ -23,7 +23,7 @@ from backend.rag.vectorstore import (
     list_documents, delete_document,
 )
 from backend.rag.retriever import get_retriever
-from backend.rag.chain import build_qa_chain
+from backend.rag.chain import build_qa_chain_with_sources, format_sources
 from backend.rag.llm import get_llm
 from backend.services.pipelines.text_pdf import load_text_pdf
 from backend.services.pipelines.scanned import load_scanned_pdf
@@ -191,8 +191,8 @@ with st.sidebar:
 # --- Main ---
 st.title("📄 Multimodal Document Intelligence")
 st.caption(
-    "Phase 4 · per-document query scoping · PDFs + Scans + Images + Invoices + "
-    "YouTube · BGE-small · ChromaDB · Groq + Gemini"
+    "Phase 6 · answers with sources · per-document scoping · PDFs + Scans + "
+    "Images + Invoices + YouTube · BGE-small · ChromaDB · Groq + Gemini"
 )
 
 scope = st.selectbox(
@@ -207,6 +207,10 @@ if "messages" not in st.session_state:
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
+        if m.get("sources"):
+            with st.expander("Sources"):
+                for s in m["sources"]:
+                    st.markdown(f"- {s}")
 
 prompt = st.chat_input("Ask a question about your document, image, invoice, or video")
 if prompt:
@@ -221,9 +225,17 @@ if prompt:
     with st.chat_message("assistant"):
         doc_filter = None if scope == "All documents" else scope
         retriever = get_retriever(vectorstore, doc_name=doc_filter)
-        chain = build_qa_chain(retriever, llm)
+        chain = build_qa_chain_with_sources(retriever, llm)
         with st.spinner("Thinking..."):
-            answer = chain.invoke(prompt)
+            result = chain.invoke(prompt)
+        answer = result["answer"]
+        sources = format_sources(result["docs"])
         st.markdown(answer)
+        if sources:
+            with st.expander("Sources"):
+                for s in sources:
+                    st.markdown(f"- {s}")
 
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+    st.session_state.messages.append(
+        {"role": "assistant", "content": answer, "sources": sources}
+    )
