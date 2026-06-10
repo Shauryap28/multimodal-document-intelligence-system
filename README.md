@@ -5,10 +5,10 @@ PDFs, scanned pages, standalone images (typed or visual), invoices/forms, and
 YouTube videos. Ask questions in natural language and get answers grounded in
 whatever you fed in.
 
-> **Status:** Phase 5 complete. Six ingestion pipelines, two LLM providers
+> **Status:** Phase 6 complete. Six ingestion pipelines, two LLM providers
 > (Groq for text, Gemini for vision), structured and unstructured extraction, a
-> manual doc-type router, per-document query scoping, an evaluation suite, and a
-> Streamlit chat UI. See [Roadmap](#roadmap).
+> manual doc-type router, per-document query scoping, an evaluation suite,
+> answers that cite their sources, and a Streamlit chat UI. See [Roadmap](#roadmap).
 
 For full design rationale, every parameter, technology choices with
 alternatives, and a record of every problem and how it was resolved, see
@@ -115,9 +115,8 @@ main.py  requirements.txt  README.md  DESIGN.md  .env(gitignored)
 - [x] **Phase 2.5** - Multi-LLM factory (Groq + Gemini), YouTube pipeline, MMR
 - [x] **Phase 3** - Gemini Vision: image description, invoice structured extraction, PDF support for vision
 - [x] **Phase 4** - Per-document query scoping (metadata filter) + per-document delete + duplicate guard
-- [x] **Phase 5** - Evaluation suite (context recall + answer correctness)
-- [ ] **Phase 6** - Citations / source attribution  ← next
-- [ ] **Phase 7** - Conversation memory (history-aware retrieval)
+- [x] **Phase 6** - Citations / source attribution (source-level)
+- [ ] **Phase 7** - Conversation memory (history-aware retrieval)  ← next
 - [ ] **Phase 8** - FastAPI backend separation
 - [ ] **Phase 9** - Docker + docker-compose
 - [ ] **Future** - Auto doc-type router (heuristic detection); reranker (add only if measured to help); multilingual embeddings (BGE-M3)
@@ -138,7 +137,8 @@ Documented honestly; several are deliberate scope decisions. Full analysis in
   answer correctness 0/2 with retrieval recall 100%); proper fix is table-QA /
   text-to-SQL, out of scope.*
 - **Handwriting / complex layout** route to Gemini Vision, not EasyOCR.
-- **No conversation memory** yet (Phase 7); **no citations** yet (Phase 6).
+- **No conversation memory** yet (Phase 7).
+- **Citations are source-level** (which documents/pages an answer drew on), not inline per-claim `[1][2]` markers - inline is a stretch goal.
 - **YouTube transcripts** can be blocked from cloud IPs (works locally; needs a residential proxy on cloud VMs).
 - **Vision will not assert the identity of a depicted person/character** - by design; it reads visible text instead.
 
@@ -157,6 +157,7 @@ For full rationale, technology choices, and the problem-resolution log, see
 - **Structured vs unstructured output** - invoices/forms get a Pydantic schema (queryable fields); arbitrary images get a natural-language description (no schema).
 - **Near-lossless structured extraction** - an `additional_details` catch-all field captures everything the fixed schema would otherwise drop.
 - **Per-document scoping via pre-filtering** - the document filter is applied inside the vector search (Chroma `where`), not after, so you always get k results from the right document.
+- **Answers cite their sources** - the chain returns the answer *and* the retrieved documents (via `RunnableParallel` + `RunnablePassthrough.assign`), so the UI shows which documents/pages each answer drew on.
 - **ChromaDB over FAISS** - native metadata storage and filtering, persistence, and HNSW indexing without a separate server; FAISS would mean rebuilding all of that for speed we can't feel at this scale.
 - **Document-as-universal-contract** - every pipeline emits the same `Document` shape, so new input types don't touch the downstream core.
 - **Measured limitations** - multi-document interference and aggregation failures were found by controlled testing and documented (and the first was then fixed), not hidden.
