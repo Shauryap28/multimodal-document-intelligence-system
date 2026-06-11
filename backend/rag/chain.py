@@ -4,15 +4,18 @@
   harness, which don't need sources).
 - build_qa_chain_with_sources: returns {"answer", "docs", "question"} so the UI
   can show which documents/pages an answer was grounded in (Phase 6 citations).
+- build_condense_question_chain / build_conversational_chain_with_sources:
+  Phase 7 conversation memory - reformulate a follow-up into a standalone
+  question using chat history, then run the unchanged Phase 6 chain on it.
 
 Both read each retrieved Document's page_content (NOT its metadata), so anything
 that must be answerable has to live in page_content. The system prompt stays
 grounded but recognizes reasonable synonyms across domains.
 """
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import (
-    RunnablePassthrough, RunnableParallel, RunnableLambda,
+    RunnablePassthrough, RunnableParallel, RunnableLambda, RunnableBranch,
 )
 
 
@@ -95,3 +98,55 @@ def format_sources(docs) -> list[str]:
         if label not in seen:
             seen.append(label)
     return seen
+
+
+# --- Phase 7: conversation memory (history-aware retrieval) ------------------
+
+_CONDENSE_SYSTEM_PROMPT = (
+    "Given the conversation so far and a follow-up question, rewrite the "
+    "follow-up as a STANDALONE question that can be understood without the "
+    "conversation. Resolve pronouns and references (e.g. 'it', 'that', 'the "
+    "document', 'its') using the history. Do NOT answer the question - only "
+    "rewrite it. If the question is already standalone, return it unchanged."
+)
+
+
+def _make_condense_prompt():
+    return ChatPromptTemplate.from_messages([
+        ("system", _CONDENSE_SYSTEM_PROMPT),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{question}"),
+    ])
+
+
+def build_condense_question_chain(llm):
+    """Returns a chain: {"question", "chat_history"} -> standalone question (str).
+
+    Short-circuits when there is no history (turn 1): the first question is
+    passed straight through, so no extra LLM call is spent rewriting a question
+    that is already standalone.
+    """
+    prompt = _make_condense_prompt()
+    rewrite = prompt | llm | StrOutputParser()
+    return RunnableBranch(
+        # no history -> return the question unchanged (no LLM call)
+        (lambda x: not x.get("chat_history"), RunnableLambda(lambda x: x["question"])),
+        # otherwise -> rewrite the follow-up into a standalone question
+        rewrite,
+    )
+
+
+def build_conversational_chain_with_sources(retriever, llm):
+    """Conversation-aware chain with citations.
+
+    Input:  {"question": str, "chat_history": list[BaseMessage]}
+    Output: {"docs", "question", "answer"} - same shape as Phase 6.
+
+    Reformulates the follow-up into a standalone query (using chat_history),
+    then runs the UNCHANGED Phase 6 retrieve+answer+sources chain on the
+    resulting string. Memory lives entirely in the reformulation step; the
+    answer prompt still sees only {context, question}.
+    """
+    condense = build_condense_question_chain(llm)   # {question, chat_history} -> str
+    qa = build_qa_chain_with_sources(retriever, llm)  # str -> {docs, question, answer}
+    return condense | qa

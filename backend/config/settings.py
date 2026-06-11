@@ -27,6 +27,12 @@ TOP_K = 4
 MMR_FETCH_K = 20
 MMR_LAMBDA = 0.5
 
+# --- Conversation memory (Phase 7) ---
+# How many recent turns (one turn = a user question + its assistant answer) to
+# feed the question-reformulation step. Follow-ups usually reference the last
+# 1-2 turns; 5 gives headroom while keeping the rewrite prompt short and cheap.
+HISTORY_WINDOW = 5
+
 # --- Generation ---
 # Per-query answers stay short to save free-tier tokens.
 MAX_OUTPUT_TOKENS = 512
