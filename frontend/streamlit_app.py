@@ -3,8 +3,10 @@
 Run from project root:
     streamlit run frontend/streamlit_app.py
 
-Phase 4: per-document query scoping + per-document delete + duplicate-ingestion
-guard (a document already in the store is not silently indexed a second time).
+Phase 7: conversation memory - follow-up questions are reformulated into
+standalone questions using recent chat history before retrieval, so "what is
+its total?" resolves correctly. Builds on Phase 4 (per-document scoping),
+Phase 6 (citations), and the duplicate-ingestion guard.
 """
 import os
 import sys
@@ -23,8 +25,11 @@ from backend.rag.vectorstore import (
     list_documents, delete_document,
 )
 from backend.rag.retriever import get_retriever
-from backend.rag.chain import build_qa_chain_with_sources, format_sources
+from backend.rag.chain import (
+    build_conversational_chain_with_sources, format_sources,
+)
 from backend.rag.llm import get_llm
+from langchain_core.messages import HumanMessage, AIMessage
 from backend.services.pipelines.text_pdf import load_text_pdf
 from backend.services.pipelines.scanned import load_scanned_pdf
 from backend.services.pipelines.image_ocr import load_image
@@ -191,8 +196,8 @@ with st.sidebar:
 # --- Main ---
 st.title("📄 Multimodal Document Intelligence")
 st.caption(
-    "Phase 6 · answers with sources · per-document scoping · PDFs + Scans + "
-    "Images + Invoices + YouTube · BGE-small · ChromaDB · Groq + Gemini"
+    "Phase 7 · conversation memory · answers with sources · per-document scoping · "
+    "PDFs + Scans + Images + Invoices + YouTube · BGE-small · ChromaDB · Groq + Gemini"
 )
 
 scope = st.selectbox(
@@ -212,11 +217,31 @@ for m in st.session_state.messages:
                 for s in m["sources"]:
                     st.markdown(f"- {s}")
 
+def build_chat_history(messages, window_turns):
+    """Convert recent chat messages into LangChain messages for reformulation.
+
+    Keeps only the last `window_turns` turns (one turn = a user message + its
+    assistant reply) and only the dialogue text - not the sources - since that
+    is all the reformulation step needs to resolve references like "it".
+    """
+    recent = messages[-(window_turns * 2):]
+    history = []
+    for m in recent:
+        if m["role"] == "user":
+            history.append(HumanMessage(content=m["content"]))
+        else:
+            history.append(AIMessage(content=m["content"]))
+    return history
+
+
 prompt = st.chat_input("Ask a question about your document, image, invoice, or video")
 if prompt:
     if count(vectorstore) == 0:
         st.warning("Process something first.")
         st.stop()
+
+    # Build history from PRIOR turns, before the current question is added.
+    history = build_chat_history(st.session_state.messages, settings.HISTORY_WINDOW)
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -225,9 +250,9 @@ if prompt:
     with st.chat_message("assistant"):
         doc_filter = None if scope == "All documents" else scope
         retriever = get_retriever(vectorstore, doc_name=doc_filter)
-        chain = build_qa_chain_with_sources(retriever, llm)
+        chain = build_conversational_chain_with_sources(retriever, llm)
         with st.spinner("Thinking..."):
-            result = chain.invoke(prompt)
+            result = chain.invoke({"question": prompt, "chat_history": history})
         answer = result["answer"]
         sources = format_sources(result["docs"])
         st.markdown(answer)
