@@ -4,8 +4,6 @@ langchain-community
 langchain-huggingface
 langchain-chroma
 langchain-google-genai
-langchain-groq
-youtube-transcript-api
 
 # Vector store + embeddings
 chromadb
@@ -14,7 +12,12 @@ sentence-transformers
 # PDF extraction
 pymupdf
 pdfplumber
-easyocr
 
 # Config
 python-dotenv
+
+# --- API (Phase 8) ---
+fastapi
+uvicorn[standard]
+python-multipart
+requests
