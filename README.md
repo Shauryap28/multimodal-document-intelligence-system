@@ -3,13 +3,7 @@
 A RAG system for chatting with documents across many types and sources - text
 PDFs, scanned pages, standalone images (typed or visual), invoices/forms, and
 YouTube videos. Ask questions in natural language and get answers grounded in
-whatever you fed in.
-
-> **Status:** Phase 7 complete. Six ingestion pipelines, two LLM providers
-> (Groq for text, Gemini for vision), structured and unstructured extraction, a
-> manual doc-type router, per-document query scoping, an evaluation suite,
-> answers that cite their sources, conversation memory for follow-up questions,
-> and a Streamlit chat UI. See [Roadmap](#roadmap).
+whatever you fed in, with the sources each answer drew on.
 
 For full design rationale, every parameter, technology choices with
 alternatives, and a record of every problem and how it was resolved, see
@@ -17,7 +11,25 @@ alternatives, and a record of every problem and how it was resolved, see
 
 ---
 
-## What works today
+## Architecture
+
+A two-tier system. A thin Streamlit UI talks over HTTP to a FastAPI service that
+owns all the RAG logic - the pipelines, embeddings, vector store, and LLM
+access. Either tier can be run, swapped, or deployed independently; the UI
+imports no backend code.
+
+```
+Streamlit UI  ──HTTP / JSON──►  FastAPI service
+(api_client)                     ├─ ingest · query · documents routers
+                                 ├─ owns embeddings · ChromaDB · LLM clients
+                                 └─ six pipelines → chunk → BGE-small embeddings
+                                    → ChromaDB → MMR retrieval → LCEL chain
+                                    → Groq Llama 3.3 70B answer (+ sources)
+```
+
+---
+
+## What it does
 
 | Input type | Pipeline | Engine |
 |---|---|---|
@@ -31,10 +43,13 @@ alternatives, and a record of every problem and how it was resolved, see
 All six converge on the same core: chunk → BGE-small embeddings → ChromaDB →
 MMR retrieval → LCEL chain → Groq Llama 3.3 70B answer.
 
-**Retrieval & management features:**
-- **Per-document query scoping** - ask within one document (metadata filter) or across all
-- **Per-document delete** - remove one document without clearing the whole store
-- **Duplicate-ingestion guard** - a document already indexed is not silently added twice
+**Retrieval, conversation & management features:**
+- **Source attribution** - each answer lists the documents/pages it was grounded in.
+- **Conversation memory** - follow-up questions ("what is its total?") resolve against the chat history before retrieval.
+- **Per-document query scoping** - ask within one document (metadata filter) or across all.
+- **Per-document delete** and **clear** - manage the store without rebuilding it.
+- **Duplicate-ingestion guard** - a document already indexed is not silently added twice.
+- **Evaluation suite** - context-recall and answer-correctness metrics over a controlled corpus.
 
 ---
 
@@ -42,7 +57,8 @@ MMR retrieval → LCEL chain → Groq Llama 3.3 70B answer.
 
 | Layer | Tool |
 |---|---|
-| UI | Streamlit |
+| UI | Streamlit (HTTP client) |
+| API | FastAPI + uvicorn |
 | Orchestration | LangChain (LCEL) |
 | Text extraction | PyMuPDF |
 | Table extraction | pdfplumber |
@@ -75,11 +91,25 @@ GROQ_API_KEY=gsk_...           # https://console.groq.com/keys      (text RAG)
 GOOGLE_API_KEY=...             # https://aistudio.google.com/apikey  (vision)
 ```
 
-Run the UI:
+---
+
+## Running it
+
+The backend and the UI run as two processes, both started from the project root:
+
 ```bash
+# terminal 1 - the API
+uvicorn backend.api.main:app --reload
+#   interactive API docs at http://127.0.0.1:8000/docs
+
+# terminal 2 - the UI
 streamlit run frontend/streamlit_app.py
 ```
-Terminal-only Q&A on a text PDF: `python main.py` (expects `data/samples/sample.pdf`).
+
+Point the UI at a non-local backend by setting `API_BASE_URL` (defaults to
+`http://127.0.0.1:8000`). Terminal-only Q&A on a text PDF is available with
+`python main.py` (expects `data/samples/sample.pdf`), which uses the RAG core
+directly without the API.
 
 First run downloads ~130 MB (BGE-small) and ~120 MB (EasyOCR), cached locally
 thereafter. Groq and Gemini are API-based (no local model).
@@ -102,49 +132,39 @@ backend/
     invoice.py         Gemini Vision structured extraction (images + PDFs)
     youtube.py         transcript fetch
     _vision_io.py      shared: file -> base64 image(s)  (DRY helper)
-frontend/streamlit_app.py
+  api/
+    main.py            FastAPI app + lifespan resource warm-up
+    deps.py            cached resource singletons
+    schemas.py         Pydantic request/response models
+    routers/           query.py  documents.py  ingest.py
+frontend/
+  streamlit_app.py     thin UI client
+  api_client.py        HTTP wrapper around the API
 data/  samples/  uploads/(gitignored)  chroma_db/(gitignored)
-main.py  requirements.txt  README.md  DESIGN.md  .env(gitignored)
+main.py  evaluate.py  requirements.txt  README.md  DESIGN.md  .env(gitignored)
 ```
 
 ---
 
-## Roadmap
-
-- [x] **Phase 1** - Text PDFs (text + tables), persistent RAG, LCEL chain, UI
-- [x] **Phase 2** - EasyOCR for scanned PDFs + manual doc-type router
-- [x] **Phase 2.5** - Multi-LLM factory (Groq + Gemini), YouTube pipeline, MMR
-- [x] **Phase 3** - Gemini Vision: image description, invoice structured extraction, PDF support for vision
-- [x] **Phase 4** - Per-document query scoping (metadata filter) + per-document delete + duplicate guard
-- [x] **Phase 6** - Citations / source attribution (source-level)
-- [x] **Phase 7** - Conversation memory (history-aware retrieval)
-- [ ] **Phase 8** - FastAPI backend separation  ← next
-- [ ] **Phase 9** - Docker + docker-compose
-- [ ] **Future** - Auto doc-type router (heuristic detection); reranker (add only if measured to help); multilingual embeddings (BGE-M3)
-
-Ordering note: the evaluation suite comes before the packaging phases (FastAPI,
-Docker) on purpose - it's the measurement foundation that lets every later
-change be judged on numbers, and packaging doesn't affect answer quality.
-
----
-
-## Known limitations (current state)
+## Known limitations
 
 Documented honestly; several are deliberate scope decisions. Full analysis in
 [`DESIGN.md`](DESIGN.md).
 
-- **Aggregation/counting over a whole document** is unreliable (RAG retrieves
-  relevant passages, not the full document). *Measured in Phase 5 (aggregation
-  answer correctness 0/2 with retrieval recall 100%); proper fix is table-QA /
-  text-to-SQL, out of scope.*
+- **Aggregation/counting over a whole document** is unreliable - RAG retrieves
+  relevant passages, not the full document (measured: aggregation answer
+  correctness 0/2 with retrieval recall 100%). The proper fix is table-QA /
+  text-to-SQL, deliberately out of scope.
 - **Handwriting / complex layout** route to Gemini Vision, not EasyOCR.
-- **Memory is single-session** - follow-up questions work within a session, but chat history resets on reload; there is no long-term memory across sessions.
-- **Citations are source-level** (which documents/pages an answer drew on), not inline per-claim `[1][2]` markers - inline is a stretch goal.
-- **YouTube transcripts** can be blocked from cloud IPs (works locally; needs a residential proxy on cloud VMs).
-- **Vision will not assert the identity of a depicted person/character** - by design; it reads visible text instead.
-
-> Multi-document interference (retrieval pulling unrelated chunks) was a measured
-> limitation in earlier phases - **fixed in Phase 4** via per-document query scoping.
+- **Conversation memory is single-session** - follow-ups work within a session,
+  but chat history resets on reload; there is no long-term memory across sessions.
+- **Source attribution is document/page level**, not inline per-claim `[1][2]` markers.
+- **The API has no auth, rate limiting, or pagination** - it is built for local,
+  single-user use.
+- **YouTube transcripts** can be blocked from cloud IPs (works locally; needs a
+  residential proxy on cloud VMs).
+- **Vision will not assert the identity of a depicted person/character** - by
+  design; it reads visible text instead.
 
 ---
 
@@ -153,13 +173,23 @@ Documented honestly; several are deliberate scope decisions. Full analysis in
 For full rationale, technology choices, and the problem-resolution log, see
 [`DESIGN.md`](DESIGN.md).
 
+- **Two-tier decoupling** - the UI is a pure HTTP client; the FastAPI service is the single owner of the RAG logic and the ChromaDB, so clients and backend evolve independently.
 - **Tiered OCR/Vision strategy** - EasyOCR for typed scans (free, local, unlimited); Gemini Vision for handwriting, structured extraction, and visual content. Right tool per input shape, not "which is better."
 - **LLM factory** - `get_llm("text")` → Groq, `get_llm("vision")` → Gemini; the rest of the code is provider-agnostic.
-- **Structured vs unstructured output** - invoices/forms get a Pydantic schema (queryable fields); arbitrary images get a natural-language description (no schema).
-- **Near-lossless structured extraction** - an `additional_details` catch-all field captures everything the fixed schema would otherwise drop.
-- **Per-document scoping via pre-filtering** - the document filter is applied inside the vector search (Chroma `where`), not after, so you always get k results from the right document.
-- **Answers cite their sources** - the chain returns the answer *and* the retrieved documents (via `RunnableParallel` + `RunnablePassthrough.assign`), so the UI shows which documents/pages each answer drew on.
-- **Follow-up questions work** - a history-aware reformulation step rewrites "what is its total?" into a standalone question before retrieval, so references resolve; it reuses the citations chain unchanged (`condense | qa`) and only spends an extra call on follow-up turns.
-- **ChromaDB over FAISS** - native metadata storage and filtering, persistence, and HNSW indexing without a separate server; FAISS would mean rebuilding all of that for speed we can't feel at this scale.
+- **Structured vs unstructured output** - invoices/forms get a Pydantic schema (queryable fields, with an `additional_details` catch-all so nothing is silently dropped); arbitrary images get a natural-language description.
+- **Per-document scoping via pre-filtering** - the document filter is applied inside the vector search (Chroma `where`), so you always get k results from the right document.
+- **Citations through chain composition** - the chain returns the answer *and* the retrieved documents (`RunnableParallel` + `RunnablePassthrough.assign`), so sources ride alongside the answer.
+- **Conversation memory as query reformulation** - a history-aware step rewrites a follow-up into a standalone question before retrieval (`condense | qa`), fixing the retrieval bottleneck rather than stuffing history into the answer prompt.
+- **ChromaDB over FAISS** - native metadata storage and filtering, persistence, and HNSW indexing without a separate server.
 - **Document-as-universal-contract** - every pipeline emits the same `Document` shape, so new input types don't touch the downstream core.
-- **Measured limitations** - multi-document interference and aggregation failures were found by controlled testing and documented (and the first was then fixed), not hidden.
+- **Measured, not assumed** - limitations like multi-document interference (since fixed via scoping) and aggregation failure were found by controlled evaluation and documented.
+
+---
+
+## Future work
+
+- **Containerization** - Docker + docker-compose to run the API and UI together.
+- **Auto doc-type router** - heuristic detection instead of the manual selector.
+- **Reranker** - a cross-encoder second stage, to be added only if evaluation shows it helps.
+- **Multilingual** - BGE-M3 embeddings and multilingual OCR.
+- **API hardening** - auth, rate limiting, pagination, versioning, and a test suite.
