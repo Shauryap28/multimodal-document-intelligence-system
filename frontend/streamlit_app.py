@@ -1,75 +1,49 @@
 """Streamlit UI - Multimodal Document Intelligence System.
 
-Run from project root:
-    streamlit run frontend/streamlit_app.py
+Run from project root (the API must be running too):
+    uvicorn backend.api.main:app --reload          # terminal 1
+    streamlit run frontend/streamlit_app.py        # terminal 2
 
-Phase 7: conversation memory - follow-up questions are reformulated into
-standalone questions using recent chat history before retrieval, so "what is
-its total?" resolves correctly. Builds on Phase 4 (per-document scoping),
-Phase 6 (citations), and the duplicate-ingestion guard.
+Phase 8: the UI is a THIN CLIENT. It owns no RAG logic, no ChromaDB, no models -
+it talks to the FastAPI backend over HTTP via api_client. Ingestion, querying,
+listing, deletion, and clearing are all API calls. This decouples the UI from
+the backend: either can be swapped or deployed independently.
 """
-import os
-import sys
-from pathlib import Path
-
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.append(str(ROOT_DIR))
-
 import streamlit as st
 
-from backend.config import settings
-from backend.rag.embeddings import get_embeddings
-from backend.rag.chunking import chunk_documents
-from backend.rag.vectorstore import (
-    get_vectorstore, add_documents, count, clear,
-    list_documents, delete_document,
-)
-from backend.rag.retriever import get_retriever
-from backend.rag.chain import (
-    build_conversational_chain_with_sources, format_sources,
-)
-from backend.rag.llm import get_llm
-from langchain_core.messages import HumanMessage, AIMessage
-from backend.services.pipelines.text_pdf import load_text_pdf
-from backend.services.pipelines.scanned import load_scanned_pdf
-from backend.services.pipelines.image_ocr import load_image
-from backend.services.pipelines.image_vision import load_image_vision
-from backend.services.pipelines.invoice import load_invoice
-from backend.services.pipelines.youtube import load_youtube_transcript
+import api_client
+from api_client import APIError
 
-st.set_page_config(
-    page_title="Multimodal Document Intelligence",
-    page_icon="📄",
-    layout="wide",
-)
+st.set_page_config(page_title="Multimodal Document Intelligence", page_icon="📄")
 
-# --- Pipeline registry ---
+# --- Input-type registry (display only; loaders live server-side) ---
+# `api_type` matches the backend FILE_LOADERS keys; YouTube uses its own endpoint.
 DOC_TYPES = {
     "Text PDF": {
-        "loader": load_text_pdf, "input": "file", "file_types": ["pdf"],
+        "api_type": "text_pdf", "input": "file", "file_types": ["pdf"],
         "hint": "Selectable text - reports, papers, books. Tables handled automatically.",
     },
     "Scanned PDF": {
-        "loader": load_scanned_pdf, "input": "file", "file_types": ["pdf"],
+        "api_type": "scanned_pdf", "input": "file", "file_types": ["pdf"],
         "hint": "Scanned pages / no selectable text. Uses EasyOCR (slow, runs on CPU).",
     },
     "Image (text)": {
-        "loader": load_image, "input": "file",
+        "api_type": "image_text", "input": "file",
         "file_types": ["png", "jpg", "jpeg", "webp", "bmp"],
         "hint": "Photo/screenshot of typed text. Uses EasyOCR (free, local).",
     },
     "Visual / Handwritten": {
-        "loader": load_image_vision, "input": "file",
+        "api_type": "visual", "input": "file",
         "file_types": ["pdf", "png", "jpg", "jpeg", "webp", "bmp"],
         "hint": "Charts, diagrams, handwriting, photos, complex/handwritten PDFs. Gemini Vision (1 call per page).",
     },
     "Invoice / Form": {
-        "loader": load_invoice, "input": "file",
+        "api_type": "invoice", "input": "file",
         "file_types": ["pdf", "png", "jpg", "jpeg", "webp"],
         "hint": "Receipts, bills, forms. Gemini Vision extracts structured fields (vendor, total, items).",
     },
     "YouTube": {
-        "loader": load_youtube_transcript, "input": "url",
+        "input": "url",
         "hint": "Paste a YouTube URL. Uses the video's auto-generated transcript.",
     },
 }
@@ -81,36 +55,20 @@ _SPINNERS = {
     "Invoice / Form": "Extracting structured fields from {name} with Gemini Vision...",
 }
 
-# --- API key check ---
-if not settings.GROQ_API_KEY:
-    st.error(
-        "GROQ_API_KEY not set. Get a free key at https://console.groq.com/keys "
-        "and add it to your .env file as GROQ_API_KEY=..."
-    )
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# --- Fetch current store state from the API (and verify it is reachable) ---
+try:
+    store = api_client.list_documents()
+except APIError as e:
+    st.error(str(e))
     st.stop()
 
+docs_in_store = store["documents"]
+chunk_count = store["chunk_count"]
 
-@st.cache_resource
-def get_resources():
-    embeddings = get_embeddings()
-    vectorstore = get_vectorstore(embeddings)
-    llm = get_llm("text")
-    return embeddings, vectorstore, llm
-
-
-embeddings, vectorstore, llm = get_resources()
-docs_in_store = list_documents(vectorstore)
-
-
-def ingest(docs):
-    if not docs:
-        return 0
-    chunks = chunk_documents(docs)
-    add_documents(vectorstore, chunks)
-    return len(chunks)
-
-
-# --- Sidebar ---
+# --- Sidebar: add + manage ---
 with st.sidebar:
     st.header("Add a document")
     doc_type_label = st.radio(
@@ -124,33 +82,26 @@ with st.sidebar:
     if config["input"] == "file":
         uploaded = st.file_uploader("Upload file", type=config["file_types"])
         if uploaded is not None and st.button("Process", type="primary"):
-            # Duplicate guard (cheap, before the expensive loader runs):
-            # a file's doc_name is its filename, so we can check up front.
-            if uploaded.name in docs_in_store:
-                st.warning(
-                    f"'{uploaded.name}' is already indexed. "
-                    "Delete it in Manage first if you want to re-ingest."
-                )
-                st.stop()
-
-            os.makedirs("data/uploads", exist_ok=True)
-            save_path = os.path.join("data/uploads", uploaded.name)
-            with open(save_path, "wb") as f:
-                f.write(uploaded.getbuffer())
             spinner_msg = _SPINNERS.get(doc_type_label, "Ingesting {name}...").format(
                 name=uploaded.name
             )
             with st.spinner(spinner_msg):
                 try:
-                    docs = config["loader"](save_path)
-                except Exception as e:
-                    st.error(f"Could not process file: {e}")
+                    result = api_client.ingest_file(
+                        uploaded.getvalue(), uploaded.name, config["api_type"]
+                    )
+                except APIError as e:
+                    st.error(str(e))
                     st.stop()
-                n = ingest(docs)
-            if n == 0:
+            if result["duplicate"]:
+                st.warning(
+                    f"'{result['doc_name']}' is already indexed. "
+                    "Delete it in Manage first if you want to re-ingest."
+                )
+            elif result["chunks_added"] == 0:
                 st.warning("No usable content could be recovered from this file.")
             else:
-                st.success(f"Indexed {n} chunks from {uploaded.name}")
+                st.success(f"Indexed {result['chunks_added']} chunks from {result['doc_name']}")
                 st.session_state.messages = []
                 st.rerun()
 
@@ -159,36 +110,42 @@ with st.sidebar:
         if url and st.button("Process video", type="primary"):
             with st.spinner("Fetching transcript and indexing..."):
                 try:
-                    docs = config["loader"](url)
-                except Exception as e:
-                    st.error(f"Could not process video: {e}")
+                    result = api_client.ingest_youtube(url)
+                except APIError as e:
+                    st.error(str(e))
                     st.stop()
-                # Duplicate guard: the video's doc_name (youtube:<id>) is known
-                # only after loading, so we check here, before adding.
-                doc_name = docs[0].metadata.get("doc_name") if docs else None
-                if doc_name and doc_name in docs_in_store:
-                    st.warning(f"This video ({doc_name}) is already indexed.")
-                    st.stop()
-                n = ingest(docs)
-            st.success(f"Indexed {n} chunks from the video transcript")
-            st.session_state.messages = []
-            st.rerun()
+            if result["duplicate"]:
+                st.warning(f"This video ({result['doc_name']}) is already indexed.")
+            elif result["chunks_added"] == 0:
+                st.warning("No transcript content could be recovered.")
+            else:
+                st.success(f"Indexed {result['chunks_added']} chunks from the video transcript")
+                st.session_state.messages = []
+                st.rerun()
 
     st.divider()
     st.header("Manage")
-    st.metric("Chunks in store", count(vectorstore))
+    st.metric("Chunks in store", chunk_count)
     st.caption(f"{len(docs_in_store)} document(s) indexed")
 
     if docs_in_store:
         to_delete = st.selectbox("Delete a document", ["-"] + docs_in_store)
         if to_delete != "-" and st.button("Delete selected"):
-            removed = delete_document(vectorstore, to_delete)
-            st.success(f"Deleted {removed} chunks from {to_delete}")
+            try:
+                result = api_client.delete_document(to_delete)
+            except APIError as e:
+                st.error(str(e))
+                st.stop()
+            st.success(f"Deleted {result['chunks_deleted']} chunks from {result['doc_name']}")
             st.session_state.messages = []
             st.rerun()
 
     if st.button("Clear entire store"):
-        clear(vectorstore)
+        try:
+            api_client.clear()
+        except APIError as e:
+            st.error(str(e))
+            st.stop()
         st.session_state.messages = []
         st.rerun()
 
@@ -196,18 +153,16 @@ with st.sidebar:
 # --- Main ---
 st.title("📄 Multimodal Document Intelligence")
 st.caption(
-    "Phase 7 · conversation memory · answers with sources · per-document scoping · "
-    "PDFs + Scans + Images + Invoices + YouTube · BGE-small · ChromaDB · Groq + Gemini"
+    "Phase 8 · FastAPI backend · conversation memory · answers with sources · "
+    "per-document scoping · PDFs + Scans + Images + Invoices + YouTube · "
+    "BGE-small · ChromaDB · Groq + Gemini"
 )
 
-scope = st.selectbox(
+scope_label = st.selectbox(
     "Ask about",
     ["All documents"] + docs_in_store,
     help="Scope the question to one document to avoid interference from others.",
 )
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
@@ -217,44 +172,32 @@ for m in st.session_state.messages:
                 for s in m["sources"]:
                     st.markdown(f"- {s}")
 
-def build_chat_history(messages, window_turns):
-    """Convert recent chat messages into LangChain messages for reformulation.
-
-    Keeps only the last `window_turns` turns (one turn = a user message + its
-    assistant reply) and only the dialogue text - not the sources - since that
-    is all the reformulation step needs to resolve references like "it".
-    """
-    recent = messages[-(window_turns * 2):]
-    history = []
-    for m in recent:
-        if m["role"] == "user":
-            history.append(HumanMessage(content=m["content"]))
-        else:
-            history.append(AIMessage(content=m["content"]))
-    return history
-
-
 prompt = st.chat_input("Ask a question about your document, image, invoice, or video")
 if prompt:
-    if count(vectorstore) == 0:
+    if chunk_count == 0:
         st.warning("Process something first.")
         st.stop()
 
-    # Build history from PRIOR turns, before the current question is added.
-    history = build_chat_history(st.session_state.messages, settings.HISTORY_WINDOW)
+    # Prior turns become chat_history (dialogue only); the server windows it.
+    history = [
+        {"role": m["role"], "content": m["content"]}
+        for m in st.session_state.messages
+    ]
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        doc_filter = None if scope == "All documents" else scope
-        retriever = get_retriever(vectorstore, doc_name=doc_filter)
-        chain = build_conversational_chain_with_sources(retriever, llm)
+        scope = None if scope_label == "All documents" else scope_label
         with st.spinner("Thinking..."):
-            result = chain.invoke({"question": prompt, "chat_history": history})
+            try:
+                result = api_client.query(prompt, scope, history)
+            except APIError as e:
+                st.error(str(e))
+                st.stop()
         answer = result["answer"]
-        sources = format_sources(result["docs"])
+        sources = result["sources"]
         st.markdown(answer)
         if sources:
             with st.expander("Sources"):
