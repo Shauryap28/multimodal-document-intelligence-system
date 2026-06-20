@@ -33,6 +33,17 @@ MMR_LAMBDA = 0.5
 # 1-2 turns; 5 gives headroom while keeping the rewrite prompt short and cheap.
 HISTORY_WINDOW = 5
 
+# --- Hybrid search (semantic + BM25) ---
+# When True, retrieval fuses dense (Chroma) with BM25 keyword search via
+# reciprocal rank fusion, to recover exact-token matches (SKUs, emails, codes)
+# that dense embeddings alone miss. Measured to lift exact-token recall.
+HYBRID_SEARCH = True
+HYBRID_WEIGHTS = [0.5, 0.5]   # [dense, sparse] - kept EQUAL for balance
+# RRF constant. Lower sharpens rank-1 dominance (a confident top hit from either
+# channel counts for more) without biasing toward either channel. Default is 60;
+# 30 helps a BM25-only rank-1 chunk surface. Sweep lower (20, 15) if needed.
+HYBRID_RRF_C = 30
+
 # --- Generation ---
 # Per-query answers stay short to save free-tier tokens.
 MAX_OUTPUT_TOKENS = 512

@@ -31,7 +31,7 @@ from langchain_core.documents import Document
 from backend.config import settings
 from backend.rag.embeddings import get_embeddings
 from backend.rag.chunking import chunk_documents
-from backend.rag.retriever import get_retriever
+from backend.rag.retriever import get_retriever, get_hybrid_retriever
 from backend.rag.chain import build_qa_chain
 from backend.rag.llm import get_llm
 
@@ -41,16 +41,27 @@ from backend.rag.llm import get_llm
 _CATEGORIES = ["Tools", "Electronics", "Garden", "Office"]
 
 
+def _sku(i: int) -> str:
+    """Opaque alphanumeric code, deterministic, with no semantic tie to the
+    product number - the kind of token dense embeddings handle worst."""
+    letters = ["QX", "ZK", "TR", "MW"][i % 4]
+    return f"{letters}{(i * 7919) % 9000 + 1000}"
+
+
 def _build_catalog() -> str:
     """100 products, categories cycling -> exactly 25 per category (by construction).
-    Large enough (~6 chunks) that aggregation must span multiple chunks."""
+    Large enough (~6 chunks) that aggregation must span multiple chunks.
+    Each product also carries an opaque SKU for the exact-token probe."""
     lines = ["Product Catalog."]
     for i in range(100):
         num = f"{i + 1:03d}"                 # zero-padded so 'Product 037' is unique
         cat = _CATEGORIES[i % 4]
         price = 20 + (i * 7) % 130
         stock = (i * 3) % 50
-        lines.append(f"Product {num} - Category: {cat} - Price: ${price} - Stock: {stock}")
+        lines.append(
+            f"Product {num} - SKU: {_sku(i)} - Category: {cat} "
+            f"- Price: ${price} - Stock: {stock}"
+        )
     return "\n".join(lines)
 
 
@@ -106,6 +117,23 @@ TEST_CASES = [
 ]
 
 
+def _exact_token_cases():
+    """Rare, opaque SKUs buried in the multi-chunk catalog - the retrieval case
+    dense embeddings are most likely to miss and a keyword/BM25 channel would
+    nail. This is the hybrid-search probe."""
+    cases = []
+    for i in (12, 53, 87):
+        cat = _CATEGORIES[i % 4]
+        cases.append({
+            "q": f"What category is the product with SKU {_sku(i)}?",
+            "doc": "catalog.txt", "ctx": _sku(i), "ans": cat, "cat": "exact_token",
+        })
+    return cases
+
+
+TEST_CASES += _exact_token_cases()
+
+
 # --- Scoring --------------------------------------------------------------
 
 def _normalize(s: str) -> str:
@@ -122,6 +150,15 @@ def _contains(text: str, expected) -> bool:
 # --- Runner ---------------------------------------------------------------
 
 def main():
+    # Retrieval mode: `python evaluate.py dense|hybrid` overrides the setting.
+    if "dense" in sys.argv:
+        use_hybrid = False
+    elif "hybrid" in sys.argv:
+        use_hybrid = True
+    else:
+        use_hybrid = settings.HYBRID_SEARCH
+    retriever_fn = get_hybrid_retriever if use_hybrid else get_retriever
+
     embeddings = get_embeddings()
     vs = Chroma(                       # in-memory: no persist_directory -> fresh each run
         collection_name="eval",
@@ -132,38 +169,61 @@ def main():
     vs.add_documents(chunks)
     llm = get_llm("text")
 
-    print(f"\nCorpus: {len(SAMPLE_DOCS)} documents, {len(chunks)} chunks\n")
-    print(f"{'category':<12} {'doc':<13} {'rec':^4} {'ans':^4}  question")
-    print("-" * 84)
+    print(f"\nCorpus: {len(SAMPLE_DOCS)} documents, {len(chunks)} chunks")
+    print(f"Retrieval mode: {'HYBRID (dense + BM25)' if use_hybrid else 'DENSE only'}\n")
+    print(f"{'category':<12} {'doc':<13} {'rec':^4} {'ans':^4} {'rank':^5}  question")
+    print("-" * 90)
 
     results = []
     for c in TEST_CASES:
-        retriever = get_retriever(vs, doc_name=c["doc"])
-        retrieved = " ".join(d.page_content for d in retriever.invoke(c["q"]))
-        recall = _contains(retrieved, c["ctx"])
+        retriever = retriever_fn(vs, doc_name=c["doc"])
+        docs = retriever.invoke(c["q"])
+        # rank (1-indexed) of the first retrieved chunk that supports the answer
+        rank = next((i + 1 for i, d in enumerate(docs)
+                     if _contains(d.page_content, c["ctx"])), None)
+        recall = rank is not None
+        hit1 = rank == 1
 
         answer = build_qa_chain(retriever, llm).invoke(c["q"])
         correct = _contains(answer, c["ans"])
 
-        results.append((c, recall, correct, answer))
+        results.append((c, recall, hit1, rank, correct, answer))
         print(f"{c['cat']:<12} {c['doc']:<13} "
-              f"{'Y' if recall else 'N':^4} {'Y' if correct else 'N':^4}  {c['q']}")
+              f"{'Y' if recall else 'N':^4} {'Y' if correct else 'N':^4} "
+              f"{(str(rank) if rank else '-'):^5}  {c['q']}")
 
     n = len(results)
-    rec = sum(1 for _, r, _, _ in results if r)
-    ans = sum(1 for _, _, a, _ in results if a)
+    rec = sum(1 for _, r, _, _, _, _ in results if r)
+    hit1 = sum(1 for _, _, h, _, _, _ in results if h)
+    ans = sum(1 for _, _, _, _, a, _ in results if a)
     print("\n=== Summary ===")
-    print(f"Context recall:     {rec}/{n}  ({round(100 * rec / n)}%)")
+    print(f"Context recall@k:   {rec}/{n}  ({round(100 * rec / n)}%)")
+    print(f"Context recall@1:   {hit1}/{n}  ({round(100 * hit1 / n)}%)")
     print(f"Answer correctness: {ans}/{n}  ({round(100 * ans / n)}%)")
 
     print("\nBy category:")
-    for cat in sorted({c["cat"] for c, _, _, _ in results}):
-        rows = [(r, a) for c, r, a, _ in results if c["cat"] == cat]
-        cr = sum(1 for r, _ in rows if r)
-        ca = sum(1 for _, a in rows if a)
-        print(f"  {cat:<12} recall {cr}/{len(rows)}   answer {ca}/{len(rows)}")
+    for cat in sorted({c["cat"] for c, _, _, _, _, _ in results}):
+        rows = [(r, h, a) for c, r, h, _, a, _ in results if c["cat"] == cat]
+        cr = sum(1 for r, _, _ in rows if r)
+        c1 = sum(1 for _, h, _ in rows if h)
+        ca = sum(1 for _, _, a in rows if a)
+        print(f"  {cat:<12} recall@k {cr}/{len(rows)}   "
+              f"recall@1 {c1}/{len(rows)}   answer {ca}/{len(rows)}")
 
-    misses = [(c, answer) for c, _, correct, answer in results if not correct]
+    # --- What the two probes tell us ----------------------------------------
+    print("\n=== Optimization probes ===")
+    et = [r for c, r, _, _, _, _ in results if c["cat"] == "exact_token"]
+    if et:
+        etr = sum(1 for r in et if r)
+        print(f"HYBRID  (exact_token recall@k): {etr}/{len(et)}")
+        print("   low  -> dense misses rare exact tokens; a keyword/BM25 channel (hybrid) would help")
+        print("   high -> dense already retrieves exact tokens; hybrid not justified yet")
+    headroom = rec - hit1
+    print(f"RERANKER (recall@k - recall@1): {rec} - {hit1} = {headroom}")
+    print("   large -> supporting chunk is retrieved but not ranked first; a reranker could promote it")
+    print("   ~0    -> supporting chunk is already top-1; reranker adds little (could even shrink k)")
+
+    misses = [(c, answer) for c, _, _, _, correct, answer in results if not correct]
     if misses:
         print("\nAnswer misses (expected vs got):")
         for c, answer in misses:

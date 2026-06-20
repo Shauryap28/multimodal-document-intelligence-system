@@ -5,10 +5,6 @@ PDFs, scanned pages, standalone images (typed or visual), invoices/forms, and
 YouTube videos. Ask questions in natural language and get answers grounded in
 whatever you fed in, with the sources each answer drew on.
 
-For full design rationale, every parameter, technology choices with
-alternatives, and a record of every problem and how it was resolved, see
-[`DESIGN.md`](DESIGN.md).
-
 ---
 
 ## Architecture
@@ -46,10 +42,11 @@ MMR retrieval → LCEL chain → Groq Llama 3.3 70B answer.
 **Retrieval, conversation & management features:**
 - **Source attribution** - each answer lists the documents/pages it was grounded in.
 - **Conversation memory** - follow-up questions ("what is its total?") resolve against the chat history before retrieval.
+- **Hybrid retrieval** - dense semantic search fused with BM25 keyword search (reciprocal rank fusion), so exact tokens (SKUs, emails, codes) that embeddings alone miss are still found.
 - **Per-document query scoping** - ask within one document (metadata filter) or across all.
 - **Per-document delete** and **clear** - manage the store without rebuilding it.
 - **Duplicate-ingestion guard** - a document already indexed is not silently added twice.
-- **Evaluation suite** - context-recall and answer-correctness metrics over a controlled corpus.
+- **Evaluation suite** - context-recall and answer-correctness metrics over a controlled corpus, with probes that decide retrieval optimizations on measured evidence.
 
 ---
 
@@ -67,7 +64,7 @@ MMR retrieval → LCEL chain → Groq Llama 3.3 70B answer.
 | YouTube transcripts | youtube-transcript-api |
 | Embeddings | BGE-small-en-v1.5 (local, 384-dim) |
 | Vector store | ChromaDB (HNSW, cosine) |
-| Retrieval | MMR + optional per-document metadata filter |
+| Retrieval | MMR (dense) + BM25 keyword, fused via reciprocal rank fusion; optional per-document metadata filter |
 | LLM (text RAG) | Groq Llama 3.3 70B |
 
 ---
@@ -141,15 +138,14 @@ frontend/
   streamlit_app.py     thin UI client
   api_client.py        HTTP wrapper around the API
 data/  samples/  uploads/(gitignored)  chroma_db/(gitignored)
-main.py  evaluate.py  requirements.txt  README.md  DESIGN.md  .env(gitignored)
+main.py  evaluate.py  requirements.txt  README.md  .env(gitignored)
 ```
 
 ---
 
 ## Known limitations
 
-Documented honestly; several are deliberate scope decisions. Full analysis in
-[`DESIGN.md`](DESIGN.md).
+Documented honestly; several are deliberate scope decisions.
 
 - **Aggregation/counting over a whole document** is unreliable - RAG retrieves
   relevant passages, not the full document (measured: aggregation answer
@@ -170,9 +166,6 @@ Documented honestly; several are deliberate scope decisions. Full analysis in
 
 ## Design highlights
 
-For full rationale, technology choices, and the problem-resolution log, see
-[`DESIGN.md`](DESIGN.md).
-
 - **Two-tier decoupling** - the UI is a pure HTTP client; the FastAPI service is the single owner of the RAG logic and the ChromaDB, so clients and backend evolve independently.
 - **Tiered OCR/Vision strategy** - EasyOCR for typed scans (free, local, unlimited); Gemini Vision for handwriting, structured extraction, and visual content. Right tool per input shape, not "which is better."
 - **LLM factory** - `get_llm("text")` → Groq, `get_llm("vision")` → Gemini; the rest of the code is provider-agnostic.
@@ -180,9 +173,24 @@ For full rationale, technology choices, and the problem-resolution log, see
 - **Per-document scoping via pre-filtering** - the document filter is applied inside the vector search (Chroma `where`), so you always get k results from the right document.
 - **Citations through chain composition** - the chain returns the answer *and* the retrieved documents (`RunnableParallel` + `RunnablePassthrough.assign`), so sources ride alongside the answer.
 - **Conversation memory as query reformulation** - a history-aware step rewrites a follow-up into a standalone question before retrieval (`condense | qa`), fixing the retrieval bottleneck rather than stuffing history into the answer prompt.
+- **Hybrid retrieval, parallel not sequential** - dense and BM25 search the same scoped pool independently and their ranked lists are fused with reciprocal rank fusion, so a keyword-only hit can recover a chunk dense missed. Added only after an eval probe measured the gap, and tuned (RRF constant) against the same eval.
 - **ChromaDB over FAISS** - native metadata storage and filtering, persistence, and HNSW indexing without a separate server.
 - **Document-as-universal-contract** - every pipeline emits the same `Document` shape, so new input types don't touch the downstream core.
-- **Measured, not assumed** - limitations like multi-document interference (since fixed via scoping) and aggregation failure were found by controlled evaluation and documented.
+- **Measured, not assumed** - retrieval optimizations and limitations (multi-document interference, since fixed via scoping; aggregation failure; the hybrid-vs-reranker decision) were settled by controlled evaluation, not guesswork.
+
+---
+
+## Evaluation
+
+A small harness (`evaluate.py`) runs fixed cases against the real retrieval +
+answer pipeline over a controlled, in-memory corpus, scoring two separate
+metrics: **context recall** (was the supporting chunk retrieved?) and **answer
+correctness** (did the final answer contain the expected fact?). It also carries
+two **probes** that turn optimization questions into measurements - an
+exact-token probe (does dense miss rare codes? → is hybrid search worth it?) and
+a rank probe comparing recall@1 vs recall@k (is the supporting chunk already
+top-ranked? → is a reranker worth it?). This is how hybrid search was justified
+and the reranker was deferred.
 
 ---
 

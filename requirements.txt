@@ -1,6 +1,7 @@
 # Core RAG / LangChain
 langchain
 langchain-community
+rank_bm25
 langchain-huggingface
 langchain-chroma
 langchain-google-genai
@@ -12,7 +13,7 @@ sentence-transformers
 # PDF extraction
 pymupdf
 pdfplumber
-
+ 
 # Config
 python-dotenv
 
